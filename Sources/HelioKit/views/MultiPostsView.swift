@@ -31,8 +31,8 @@ struct MultiPostsView: View {
   @Environment(\.horizontalSizeClass) private var hSizeClass
   @Default(.SubredditFeedDefSettings) var subFeedSettings
 
-  func caller(_ lastElementId: String?, _ sorting: SubListingSortOption?, _ searchQuery: String?, _ flair: String?) async -> ([RedditEntityType]?, String?)? {
-    if let sorting, let result = await multi.fetchPosts(sort: sorting, after: lastElementId, contentWidth: contentWidth), let newPosts = result.0 {
+  func caller(_ lastElementId: String?, _ sorting: SubListingSortOption?, _ searchQuery: String?, _ flair: String?, _ limit: Int) async -> ([RedditEntityType]?, String?)? {
+    if let sorting, let result = await multi.fetchPosts(sort: sorting, after: lastElementId, contentWidth: contentWidth, limit: limit), let newPosts = result.0 {
       return (newPosts, result.1)
     }
     return nil

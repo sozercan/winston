@@ -23,7 +23,25 @@ class RedditAPI {
   /// forwards the query to `helioapp://auth-success`, where `authorize` picks it up.
   static let appRedirectURI: String = "https://sozercan.github.io/helio/auth-success"
 
-  var me: User?
+  private let currentAccount: @Sendable () async -> RedditCredential?
+  private let session: Session
+
+  init(session: Session = AF, currentAccount: @escaping @Sendable () async -> RedditCredential? = {
+    await MainActor.run { RedditCredentialsManager.shared.selectedCredential }
+  }) {
+    self.session = session
+    self.currentAccount = currentAccount
+  }
+
+  /// Resolve selection once when both the endpoint and dispatch depend on the account.
+  func captureAccount() async -> RedditCredential? {
+    await currentAccount()
+  }
+
+  /// Compatibility read-through; the API layer no longer owns or publishes account state.
+  @MainActor var me: User? {
+    RedditCredentialsManager.profile.user
+  }
 
   /// This is a replacement for getRequestHeader. We need to replace every instance of the former by this one
   func fetchRequestHeaders(
@@ -37,8 +55,12 @@ class RedditAPI {
       "User-Agent": RedditCredential.defaultUserAgent(),
     ]
     if includeAuth {
+      var credential = altCredential
+      if credential == nil {
+        credential = await currentAccount()
+      }
       if
-        let selectedCredential = altCredential ?? RedditCredentialsManager.shared.selectedCredential,
+        let selectedCredential = credential,
         let accessToken = await selectedCredential.getUpToDateToken(forceRenew: force, saveToken: saveToken, rejectedToken: rejectedToken)
       {
         headers["Authorization"] = "Bearer \(accessToken.token)"
@@ -71,7 +93,7 @@ class RedditAPI {
     saveToken: Bool = true,
   ) async -> Result<D, AFError> {
     await self._doRequest(authenticated: authenticated, altCredential: altCredential, saveToken: saveToken) { headers in
-      let req = AF.request(url, method: method, parameters: params, encoder: URLEncodedFormParameterEncoder(destination: paramsLocation), headers: headers, requestModifier: reqModifier).validate()
+      let req = session.request(url, method: method, parameters: params, encoder: URLEncodedFormParameterEncoder(destination: paramsLocation), headers: headers, requestModifier: reqModifier).validate()
       return await req.serializingDecodable(decodable).response.result
     }
   }
@@ -86,7 +108,7 @@ class RedditAPI {
     saveToken: Bool = true,
   ) async -> Result<D, AFError> {
     await self._doRequest(authenticated: authenticated, altCredential: altCredential, saveToken: saveToken) { headers in
-      let req = AF.request(url, method: method, parameters: ["raw_json": 1], headers: headers, requestModifier: reqModifier).validate()
+      let req = session.request(url, method: method, parameters: ["raw_json": 1], headers: headers, requestModifier: reqModifier).validate()
       return await req.serializingDecodable(decodable).response.result
     }
   }
@@ -102,7 +124,7 @@ class RedditAPI {
     saveToken: Bool = true,
   ) async -> Result<String, AFError> {
     await self._doRequest(authenticated: authenticated, altCredential: altCredential, saveToken: saveToken) { headers in
-      let req = AF.request(url, method: method, parameters: params, encoder: URLEncodedFormParameterEncoder(destination: paramsLocation), headers: headers, requestModifier: reqModifier).validate()
+      let req = session.request(url, method: method, parameters: params, encoder: URLEncodedFormParameterEncoder(destination: paramsLocation), headers: headers, requestModifier: reqModifier).validate()
       return await req.serializingString().result
     }
   }
@@ -117,7 +139,7 @@ class RedditAPI {
     saveToken: Bool = true,
   ) async -> Result<String, AFError> {
     await self._doRequest(authenticated: authenticated, altCredential: altCredential, saveToken: saveToken) { headers in
-      let req = AF.request(url, method: method, parameters: ["raw_json": 1], headers: headers).validate()
+      let req = session.request(url, method: method, parameters: ["raw_json": 1], headers: headers).validate()
       return await req.serializingString().result
     }
   }
@@ -133,20 +155,29 @@ class RedditAPI {
     renewedToken: Bool = false,
     req: (HTTPHeaders) async -> Result<D, AFError>,
   ) async -> Result<D, AFError> {
-    guard let headers = await fetchRequestHeaders(force: forceAuth, includeAuth: authenticated, altCredential: altCredential, saveToken: saveToken, rejectedToken: rejectedToken) else { return .failure(.serverTrustEvaluationFailed(reason: .noPublicKeysFound)) }
+    guard !Task.isCancelled else { return .failure(.explicitlyCancelled) }
+    // Resolve selection exactly once. Retries and token renewal must remain on this account,
+    // and an absent account must not become a deferred "use whoever is selected later".
+    var credential = altCredential
+    if authenticated, credential == nil {
+      credential = await currentAccount()
+    }
+    guard !Task.isCancelled else { return .failure(.explicitlyCancelled) }
+    guard !authenticated || credential != nil, let headers = await fetchRequestHeaders(force: forceAuth, includeAuth: authenticated, altCredential: credential, saveToken: saveToken, rejectedToken: rejectedToken) else { return .failure(.serverTrustEvaluationFailed(reason: .noPublicKeysFound)) }
+    guard !Task.isCancelled else { return .failure(.explicitlyCancelled) }
 
     let result = await req(headers)
-    guard case let .failure(error) = result else { return result }
+    guard case let .failure(error) = result, !Task.isCancelled else { return result }
     // A 401 means the token expired or was revoked early: renew it once.
     if authenticated, !renewedToken, error.responseCode == 401 {
       let rejected = headers["Authorization"].map { String($0.dropFirst("Bearer ".count)) }
-      return await self._doRequest(attempt: attempt, forceAuth: true, authenticated: authenticated, altCredential: altCredential, saveToken: saveToken,
+      return await self._doRequest(attempt: attempt, forceAuth: true, authenticated: authenticated, altCredential: credential, saveToken: saveToken,
                                    rejectedToken: rejected, renewedToken: true, req: req)
     }
     if attempt < Self.maxRetries, Self.isTransient(error) {
       try? await Task.sleep(for: .milliseconds(300 * (attempt + 1)))
       // Keeps the rejected token: a credential snapshot (`altCredential`) still holds it.
-      return await self._doRequest(attempt: attempt + 1, authenticated: authenticated, altCredential: altCredential, saveToken: saveToken,
+      return await self._doRequest(attempt: attempt + 1, authenticated: authenticated, altCredential: credential, saveToken: saveToken,
                                    rejectedToken: rejectedToken, renewedToken: renewedToken, req: req)
     }
     return result
@@ -192,7 +223,7 @@ class RedditAPI {
         let newAcessToken = RedditCredential.AccessToken(token: data.access_token, expiration: data.expires_in, lastRefresh: Date())
         credential.refreshToken = data.refresh_token
         credential.accessToken = newAcessToken
-        if let meData = await self.fetchMe(force: true, altCredential: credential, saveToken: false) {
+        if let meData = await self.fetchMe(altCredential: credential, saveToken: false) {
           credential.userName = meData.name
           if let avatar = (meData.subreddit?.icon_img ?? meData.icon_img ?? meData.snoovatar_img), let rootAvatar = rootURL(avatar)?.absoluteString {
             credential.profilePicture = rootAvatar

@@ -12,10 +12,8 @@ struct RefetchMeListenerModifier: ViewModifier {
   @Default(.GeneralDefSettings) private var generalDefSettings
   func body(content: Content) -> some View {
     content
-      .onChange(of: generalDefSettings.redditCredentialSelectedID) { newCredID in
-        if let newCredID, let newCred = RedditCredentialsManager.getById(newCredID) {
-          RedditCredentialsManager.shared.updateMe(altCred: newCred)
-        }
+      .onChange(of: generalDefSettings.redditCredentialSelectedID) {
+        RedditCredentialsManager.shared.updateMe()
       }
   }
 }

@@ -9,39 +9,47 @@ import Defaults
 import Nuke
 import SwiftUI
 
+@MainActor
 @Observable
 class FeedItemsManager<S> {
-  typealias ItemsFetchFn = (_ lastElementId: String?, _ sorting: S?, _ searchQuery: String?, _ flair: String?) async -> (entities: [RedditEntityType]?, after: String?)?
+  typealias ItemsFetchFn = @MainActor (_ lastElementId: String?, _ sorting: S?, _ searchQuery: String?, _ flair: String?, _ limit: Int) async -> (entities: [RedditEntityType]?, after: String?)?
 
   /// `onlyReadPosts`: paging stopped after several pages in a row held only hidden read posts.
   enum DisplayMode: String { case loading, empty, items, endOfFeed, error, onlyReadPosts }
 
-  private var currentTask: Task<Void, Never>?
+  @ObservationIgnored private var currentTask: Task<Void, Never>?
+  @ObservationIgnored private var currentRequestID: UUID?
+
+  /// One immutable query for the whole page chain, including pages hidden as already read.
+  private struct Request {
+    let sorting: S?
+    let searchQuery: String?
+    let flair: String?
+    let chunkSize: Int
+  }
+
   /// Set once the feed starts loading its first page.
-  @ObservationIgnored var initialLoadStarted = false
-  var displayMode: DisplayMode = .loading
+  @ObservationIgnored private(set) var initialLoadStarted = false
+  private(set) var displayMode: DisplayMode = .loading
+  private(set) var isLoadingMore = false
+  @ObservationIgnored private var failedLoadingMore = false
   var loadingPinned = false
   var pinnedPosts: [Post] = []
-  var entities: [RedditEntityType] = [] {
+  private(set) var entities: [RedditEntityType] = [] {
     didSet { indexByID = Dictionary(entities.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first }) }
   }
 
   /// Rows look their position up as they appear; searching `entities` for each was quadratic.
   @ObservationIgnored private var indexByID: [String: Int] = [:]
-  var loadedEntitiesIds: Set<String> = []
-  var lastElementId: String?
-  var sorting: S? {
-    willSet { withAnimation { displayMode = .loading } }
-  }
+  private var loadedEntitiesIds: Set<String> = []
+  private(set) var lastElementId: String?
+  var sorting: S?
 
   var searchQuery = Debouncer("")
-  var selectedFilter: ShallowCachedFilter? {
-    willSet { withAnimation { displayMode = .loading } }
-  }
+  var selectedFilter: ShallowCachedFilter?
 
   var chunkSize: Int
-  private var onScreenEntities: [(entity: RedditEntityType, index: Int)] = []
-  private var fetchFn: ItemsFetchFn
+  private let fetchFn: ItemsFetchFn
   private let prefetchRange = 2
   /// Whether this feed drops already-read posts when "Hide read posts" is on.
   private let hideReadPosts: Bool
@@ -55,72 +63,112 @@ class FeedItemsManager<S> {
     self.chunkSize = Defaults[.SubredditFeedDefSettings].chunkLoadSize
   }
 
-  func fetchCaller(loadingMore: Bool) async {
-    await fetchPage(loadingMore: loadingMore, after: loadingMore ? lastElementId : nil, hiddenPagesInARow: 0)
-    await MainActor.run { self.currentTask = nil }
+  func loadIfNeeded() async {
+    guard !initialLoadStarted else { return }
+    await reload()
   }
 
-  private func fetchPage(loadingMore: Bool, after lastElementId: String?, hiddenPagesInARow: Int) async {
-    if !loadingMore, let currentTask, !currentTask.isCancelled {
-      currentTask.cancel()
+  func reload(clearItems: Bool = false) async {
+    guard !Task.isCancelled else { return }
+    await startFetch(loadingMore: false, clearItems: clearItems)?.value
+  }
+
+  func loadMore() async {
+    await fetchCaller(loadingMore: true)
+  }
+
+  func retry() async {
+    await fetchCaller(loadingMore: failedLoadingMore)
+  }
+
+  private func fetchCaller(loadingMore: Bool) async {
+    // A row task can be cancelled by a refresh before it ever starts running.
+    guard !Task.isCancelled else { return }
+    await startFetch(loadingMore: loadingMore)?.value
+  }
+
+  /// Reserve the request synchronously, so rows appearing together share one page fetch.
+  private func startFetch(loadingMore: Bool, clearItems: Bool = false) -> Task<Void, Never>? {
+    if loadingMore {
+      if let currentTask {
+        return currentTask
+      }
+      guard lastElementId != nil, displayMode == .items || displayMode == .onlyReadPosts || displayMode == .error else { return nil }
+    } else {
+      currentTask?.cancel()
     }
 
-    let searchQuery = selectedFilter?.type == .custom ? selectedFilter?.text : searchQuery.debounced.isEmpty ? nil : searchQuery.debounced
-    let filter = selectedFilter?.type != .custom ? selectedFilter?.text : nil
+    initialLoadStarted = true
+    isLoadingMore = loadingMore
+    if clearItems {
+      entities = []
+      loadedEntitiesIds = []
+      lastElementId = nil
+    }
+    withAnimation { displayMode = loadingMore ? .items : .loading }
+    let requestID = UUID()
+    currentRequestID = requestID
+    let request = Request(
+      sorting: sorting,
+      searchQuery: selectedFilter?.type == .custom ? selectedFilter?.text : searchQuery.debounced.isEmpty ? nil : searchQuery.debounced,
+      flair: selectedFilter?.type != .custom ? selectedFilter?.text : nil,
+      chunkSize: chunkSize,
+    )
+    let after = loadingMore ? lastElementId : nil
+    let task = Task {
+      await self.fetchPage(loadingMore: loadingMore, after: after, hiddenPagesInARow: 0, request: request, requestID: requestID)
+      // A superseded task must not release a newer request's reservation.
+      if self.currentRequestID == requestID {
+        self.currentTask = nil
+        self.currentRequestID = nil
+        self.isLoadingMore = false
+      }
+    }
+    currentTask = task
+    return task
+  }
 
-    guard let (fetchedEntities, after) = await fetchFn(lastElementId, sorting, searchQuery, filter), let fetchedEntities else {
-      await MainActor.run { withAnimation { displayMode = .error } }
+  private func fetchPage(loadingMore: Bool, after lastElementId: String?, hiddenPagesInARow: Int, request: Request, requestID: UUID) async {
+    guard currentRequestID == requestID, !Task.isCancelled else { return }
+    let result = await fetchFn(lastElementId, request.sorting, request.searchQuery, request.flair, request.chunkSize)
+    // Cancellation is cooperative: a network callback may still return data or an error.
+    guard currentRequestID == requestID, !Task.isCancelled else { return }
+    guard let (fetchedEntities, after) = result, let fetchedEntities else {
+      failedLoadingMore = loadingMore
+      withAnimation { displayMode = .error }
       return
     }
 
     // Without a cursor, the next fetch would start over from the first page.
-    let reachedEnd = fetchedEntities.count < chunkSize || after == nil
+    let reachedEnd = fetchedEntities.count < request.chunkSize || after == nil
     let shownEntities = withoutReadPosts(fetchedEntities)
     let onlyReadPosts = shownEntities.isEmpty && !fetchedEntities.isEmpty && !reachedEnd
-    // Every post on this page was already read: keep paging instead of showing a gap.
     let skipPage = onlyReadPosts && hiddenPagesInARow < maxHiddenPagesInARow
-    // Stop paging, but offer to continue: no new row will appear to trigger the next page.
     let gaveUp = onlyReadPosts && !skipPage
 
     if !loadingMore {
-      var newLoadedEntitiesIds = Set<String>()
-      for ent in shownEntities {
-        newLoadedEntitiesIds.insert(ent.fullname)
-      }
-      // On the main actor, which renders `entities` and reads the row index.
-      await MainActor.run { [newLoadedEntitiesIds] in
-        withAnimation {
-          displayMode = skipPage ? .items : gaveUp ? .onlyReadPosts : shownEntities.isEmpty ? .empty : reachedEnd ? .endOfFeed : .items
-          entities = shownEntities
-          self.lastElementId = after
-          loadedEntitiesIds = newLoadedEntitiesIds
-        }
+      withAnimation {
+        displayMode = skipPage ? .items : gaveUp ? .onlyReadPosts : shownEntities.isEmpty ? .empty : reachedEnd ? .endOfFeed : .items
+        entities = shownEntities
+        self.lastElementId = after
+        loadedEntitiesIds = Set(shownEntities.map(\.fullname))
       }
     } else {
       var newLoadedEntitiesIds = loadedEntitiesIds
       var newEntities = entities
-
-      for ent in shownEntities {
-        if newLoadedEntitiesIds.contains(ent.fullname) {
-          continue
-        }
-        newLoadedEntitiesIds.insert(ent.fullname)
-        newEntities.append(ent)
+      for entity in shownEntities where newLoadedEntitiesIds.insert(entity.fullname).inserted {
+        newEntities.append(entity)
       }
-
-      // Awaited, so it lands before the next page's (a skipped page fetches on right away)
-      // and can't overwrite that page's error.
-      await MainActor.run { [newEntities, newLoadedEntitiesIds] in
-        // Don't animate appending — it causes scroll position jumps
-        self.displayMode = reachedEnd ? .endOfFeed : gaveUp ? .onlyReadPosts : .items
-        self.entities = newEntities
-        self.lastElementId = after
-        self.loadedEntitiesIds = newLoadedEntitiesIds
-      }
+      // Don't animate appending: it causes scroll jumps and builds every new row in one frame.
+      displayMode = reachedEnd ? .endOfFeed : gaveUp ? .onlyReadPosts : .items
+      entities = newEntities
+      self.lastElementId = after
+      loadedEntitiesIds = newLoadedEntitiesIds
     }
 
     if skipPage {
-      await fetchPage(loadingMore: true, after: after, hiddenPagesInARow: hiddenPagesInARow + 1)
+      isLoadingMore = true
+      await fetchPage(loadingMore: true, after: after, hiddenPagesInARow: hiddenPagesInARow + 1, request: request, requestID: requestID)
     }
   }
 
@@ -136,11 +184,10 @@ class FeedItemsManager<S> {
 
   /// On the main actor, like the rows calling it: rows appearing together must not each start
   /// loading the next page.
-  @MainActor
   func elementAppeared(entity: RedditEntityType) {
-    let index = indexByID[entity.id] ?? 0
-    if displayMode != .endOfFeed, !entities.isEmpty, index >= entities.count - 7, currentTask == nil {
-      self.currentTask = Task { await fetchCaller(loadingMore: true) }
+    guard let index = indexByID[entity.id] else { return }
+    if displayMode == .items, !entities.isEmpty, index >= entities.count - 7, currentTask == nil {
+      startFetch(loadingMore: true)
     }
 
     let start = index - prefetchRange < 0 ? 0 : index - prefetchRange
@@ -151,7 +198,6 @@ class FeedItemsManager<S> {
     Post.prefetcher.startPrefetching(with: reqs)
   }
 
-  @MainActor
   func elementDisappeared(entity: RedditEntityType) {
     let reqs = getImgReqsFrom([entity])
     Post.prefetcher.stopPrefetching(with: reqs)

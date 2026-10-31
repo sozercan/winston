@@ -11,12 +11,12 @@ import Foundation
 
 extension RedditAPI {
   func fetchSubPosts(_ id: String, limit: Int = Defaults[.SubredditFeedDefSettings].chunkLoadSize, sort: SubListingSortOption = .best, after: String? = nil) async -> ([ListingChild<Either<PostData, CommentData>>]?, String?)? {
-    let subID = buildSubID(id, sort, after)
+    guard let account = await captureAccount(), let subID = buildSubID(id, sort, after, account: account) else { return nil }
     let params = FetchSubPostsPayload(limit: limit, after: after)
 
     let urlString = "\(RedditAPI.redditApiURLBase)\(subID)".replacingOccurrences(of: " ", with: "%20")
 
-    switch await self.doRequest(urlString, method: .get, params: params, paramsLocation: .queryString, decodable: Listing<Either<PostData, CommentData>>.self) {
+    switch await self.doRequest(urlString, method: .get, params: params, paramsLocation: .queryString, decodable: Listing<Either<PostData, CommentData>>.self, altCredential: account) {
     case let .success(data):
       return (data.data?.children, data.data?.after)
     case let .failure(error):
@@ -26,13 +26,13 @@ extension RedditAPI {
   }
 
   func fetchSavedPosts(_ id: String, after: String? = nil, searchText: String? = nil) async -> [Either<PostData, CommentData>]? {
-    let subID = buildSubID(id, nil, after, searchText)
+    guard let account = await captureAccount(), let subID = buildSubID(id, nil, after, searchText, account: account) else { return nil }
     let limit = Defaults[.SubredditFeedDefSettings].chunkLoadSize
     let params = FetchSubsPayload(limit: limit, after: after)
 
     let urlString = "\(RedditAPI.redditApiURLBase)\(subID)".replacingOccurrences(of: " ", with: "%20")
 
-    switch await self.doRequest(urlString, method: .get, params: params, paramsLocation: .queryString, decodable: Listing<Either<PostData, CommentData>>.self) {
+    switch await self.doRequest(urlString, method: .get, params: params, paramsLocation: .queryString, decodable: Listing<Either<PostData, CommentData>>.self, altCredential: account) {
     case let .success(data):
       return data.data?.children?.map(\.data).compactMap(\.self)
     case let .failure(error):
@@ -41,16 +41,16 @@ extension RedditAPI {
     }
   }
 
-  private func buildSubID(_ id: String, _ sort: SubListingSortOption?, _ after: String?, _ searchText: String? = nil) -> String {
+  private func buildSubID(_ id: String, _ sort: SubListingSortOption?, _ after: String?, _ searchText: String? = nil, account: RedditCredential) -> String? {
     let appendedFileType = ".json"
     var subID = ""
 
     if id != savedKeyword {
       subID = id == "" ? "/" : id.hasPrefix("/r/") ? id : "/r/\(id)"
-    } else if let username = RedditAPI.shared.me?.data?.name {
+    } else if let username = account.userName, !username.isEmpty {
       subID = "/user/\(username)/saved"
     } else {
-      print("Sub ID failed to build. Invalid logic... content will fail to load.")
+      return nil
     }
 
     subID = !subID.hasSuffix("/") ? "\(subID)/" : subID

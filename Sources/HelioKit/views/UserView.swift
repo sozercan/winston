@@ -29,8 +29,8 @@ struct UserView: View {
   @State private var forceRefresh = false
   @State private var loadNextData: Bool = false
 
-  func fetcher(_ after: String?, _ sorting: SubListingSortOption?, _ searchQuery: String?, _ flair: String?) async -> ([RedditEntityType]?, String?)? {
-    if let overviewDataResult = await user.refetchOverview(dataTypeFilter, after), let overviewData = overviewDataResult.0 {
+  func fetcher(_ after: String?, _ sorting: SubListingSortOption?, _ searchQuery: String?, _ flair: String?, _ limit: Int) async -> ([RedditEntityType]?, String?)? {
+    if let overviewDataResult = await user.refetchOverview(dataTypeFilter, after, limit: limit), let overviewData = overviewDataResult.0 {
       Task { await user.redditAPI.updateOverviewSubjectsWithAvatar(subjects: overviewData, avatarSize: selectedTheme.postLinks.theme.badge.avatar.size) }
 
       let newData: [RedditEntityType]? = overviewData.compactMap {

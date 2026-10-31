@@ -260,12 +260,13 @@ extension Comment {
         newComment.saved = false
         newComment.archived = false
         newComment.count = 0
-        newComment.author = RedditAPI.shared.me?.data?.name ?? ""
+        let author = await MainActor.run { RedditAPI.shared.me?.data }
+        newComment.author = author?.name ?? ""
         newComment.created_utc = nil
         newComment.send_replies = nil
         newComment.parent_id = id
         newComment.score = nil
-        newComment.author_fullname = "t2_\(RedditAPI.shared.me?.data?.id ?? "")"
+        newComment.author_fullname = "t2_\(author?.id ?? "")"
         newComment.approved_by = nil
         newComment.mod_note = nil
         newComment.collapsed = nil

@@ -23,13 +23,19 @@ struct Me: View {
           UserView(user: user)
             .id("me-user-view-\(user.id)")
 
+        } else if RedditCredentialsManager.profile.state == .error {
+          ContentUnavailableView {
+            Label("Unable to load profile", systemImage: "person.crop.circle.badge.exclamationmark")
+          } actions: {
+            Button("Retry") { Task { await RedditCredentialsManager.profile.refresh() } }
+          }
         } else {
           ProgressView()
             .progressViewStyle(.circular)
             .frame(maxWidth: .infinity, minHeight: .screenH - 200)
             .onAppear {
               Task(priority: .userInitiated) {
-                await RedditAPI.shared.fetchMe(force: true)
+                await RedditCredentialsManager.profile.refresh()
               }
             }
         }

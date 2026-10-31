@@ -19,7 +19,7 @@ extension RedditAPI {
   }
 
   func upadteMulti(name: String, displayName: String, subs: [String], description: String = "", color: String? = nil, visibility: MultiVisibility = .pub) async -> Bool? {
-    if let myName = me?.data?.name {
+    if let myName = await MainActor.run(body: { me?.data?.name }) {
       let params = UpdateMultiPayload(
         description_md: description,
         display_name: name,

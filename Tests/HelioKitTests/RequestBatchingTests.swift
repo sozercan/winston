@@ -84,7 +84,8 @@ struct RedditInfoLoaderTests {
 
   @Test func batchesPostsAndSubredditsAndCachesThem() async {
     let calls = Calls()
-    let loader = RedditInfoLoader(currentAccount: { nil }, fetch: { fullnames, names, _ in
+    let account = RedditCredential(apiAppID: "placeholder-client-id", refreshToken: "placeholder-refresh-token")
+    let loader = RedditInfoLoader(currentAccount: { account }, authorizationIsCurrent: { _ in true }, fetch: { fullnames, names, _ in
       calls.record(fullnames + names.map { "sr:\($0)" })
       var things = fullnames.compactMap { self.post(String($0.dropFirst(3))).map(RedditInfoLoader.Thing.post) }
       if names.contains("apple"), let apple = self.subreddit("apple") {
@@ -108,10 +109,10 @@ struct RedditInfoLoaderTests {
   /// Results carry the account's votes and saves, and only some accounts see private subreddits.
   @Test func keepsEachAccountsResultsApart() async {
     let calls = Calls()
-    let first = RedditCredential(apiAppID: "first"), second = RedditCredential(apiAppID: "second")
+    let first = RedditCredential(apiAppID: "first", refreshToken: "placeholder-first-grant"), second = RedditCredential(apiAppID: "second", refreshToken: "placeholder-second-grant")
     let selected = Mutex(first)
-    let loader = RedditInfoLoader(currentAccount: { selected.withLock { $0 } }, fetch: { fullnames, _, account in
-      calls.record(fullnames.map { "\(account?.apiAppID ?? "none"):\($0)" })
+    let loader = RedditInfoLoader(currentAccount: { selected.withLock { $0 } }, authorizationIsCurrent: { _ in true }, fetch: { fullnames, _, account in
+      calls.record(fullnames.map { "\(account.apiAppID):\($0)" })
       return fullnames.compactMap { self.post(String($0.dropFirst(3))).map(RedditInfoLoader.Thing.post) }
     })
     _ = await loader.post("t3_a")
@@ -148,87 +149,201 @@ struct AccessTokenRefresherTests {
     .init(token: value, expiration: 3600, lastRefresh: Date().addingTimeInterval(-age))
   }
 
-  @Test func concurrentRefreshesShareOneRequest() async {
+  @Test func concurrentRefreshesShareOneRequest() async throws {
+    let authorization = try #require(RedditCredential(apiAppID: "placeholder-client-id", refreshToken: "placeholder-refresh-token").authorizationID)
     let calls = Calls()
     let refresher = AccessTokenRefresher()
-    let refresh: @Sendable () async -> RedditCredential.AccessToken? = {
+    let refresh: @Sendable () async -> AccessTokenRefresher.Outcome = {
       calls.record(["refresh"])
       try? await Task.sleep(for: .milliseconds(20))
-      return self.token("new")
+      return .token(self.token("new"))
     }
-    async let a = refresher.token(refreshToken: "r", forceRenew: false, refresh: refresh)
-    async let b = refresher.token(refreshToken: "r", forceRenew: false, refresh: refresh)
+    async let a = refresher.refresh(for: authorization, forceRenew: false, refresh: refresh)
+    async let b = refresher.refresh(for: authorization, forceRenew: false, refresh: refresh)
     let (first, second) = await (a, b)
     // Asked again before the credential stored the new token.
-    let third = await refresher.token(refreshToken: "r", forceRenew: false, refresh: refresh)
+    let third = await refresher.refresh(for: authorization, forceRenew: false, refresh: refresh)
 
-    #expect(first?.token == "new" && second?.token == "new" && third?.token == "new")
+    #expect(first.accessToken?.token == "new" && second.accessToken?.token == "new" && third.accessToken?.token == "new")
     #expect(calls.all.count == 1)
   }
 
-  @Test func forcedRenewalReplacesTheRejectedToken() async {
+  @Test func forcedRenewalReplacesTheRejectedToken() async throws {
+    let authorization = try #require(RedditCredential(apiAppID: "placeholder-client-id", refreshToken: "placeholder-refresh-token").authorizationID)
     let calls = Calls()
     let refresher = AccessTokenRefresher()
-    _ = await refresher.token(refreshToken: "r", forceRenew: false) {
+    _ = await refresher.refresh(for: authorization, forceRenew: false) {
       calls.record(["first"])
-      return self.token("revoked")
+      return .token(self.token("revoked"))
     }
-    let renewed = await refresher.token(refreshToken: "r", forceRenew: true, rejected: "revoked") {
+    let renewed = await refresher.refresh(for: authorization, forceRenew: true, rejected: "revoked") {
       calls.record(["second"])
-      return self.token("new")
+      return .token(self.token("new"))
     }
 
-    #expect(renewed?.token == "new")
+    #expect(renewed.accessToken?.token == "new")
     #expect(calls.all.count == 2)
   }
 
   /// A retry after a renewal (401, renewed, 503) gets the renewed token, not the rejected one a
   /// credential snapshot still holds, and doesn't renew again.
-  @Test func retryAfterRenewalReusesTheRenewedToken() async {
+  @Test func retryAfterRenewalReusesTheRenewedToken() async throws {
+    let authorization = try #require(RedditCredential(apiAppID: "placeholder-client-id", refreshToken: "placeholder-refresh-token").authorizationID)
     let calls = Calls()
     let refresher = AccessTokenRefresher()
-    _ = await refresher.token(refreshToken: "r", forceRenew: true, rejected: "revoked") {
+    _ = await refresher.refresh(for: authorization, forceRenew: true, rejected: "revoked") {
       calls.record(["renew"])
-      return self.token("renewed")
+      return .token(self.token("renewed"))
     }
-    let retry = await refresher.token(refreshToken: "r", forceRenew: false, rejected: "revoked") {
+    let retry = await refresher.refresh(for: authorization, forceRenew: false, rejected: "revoked") {
       calls.record(["again"])
-      return self.token("other")
+      return .token(self.token("other"))
     }
 
-    #expect(retry?.token == "renewed")
+    #expect(retry.accessToken?.token == "renewed")
     #expect(calls.all.count == 1)
   }
 
-  @Test func neverReusesTheRejectedToken() async {
+  @Test func neverReusesTheRejectedToken() async throws {
+    let authorization = try #require(RedditCredential(apiAppID: "placeholder-client-id", refreshToken: "placeholder-refresh-token").authorizationID)
     let calls = Calls()
     let refresher = AccessTokenRefresher()
-    _ = await refresher.token(refreshToken: "r", forceRenew: false) {
+    _ = await refresher.refresh(for: authorization, forceRenew: false) {
       calls.record(["first"])
-      return self.token("revoked")
+      return .token(self.token("revoked"))
     }
-    let next = await refresher.token(refreshToken: "r", forceRenew: false, rejected: "revoked") {
+    let next = await refresher.refresh(for: authorization, forceRenew: false, rejected: "revoked") {
       calls.record(["second"])
-      return self.token("new")
+      return .token(self.token("new"))
     }
 
-    #expect(next?.token == "new")
+    #expect(next.accessToken?.token == "new")
     #expect(calls.all.count == 2)
   }
 
-  @Test func forcedRenewalReusesATokenNewerThanTheRejectedOne() async {
+  @Test func forcedRenewalReusesATokenNewerThanTheRejectedOne() async throws {
+    let authorization = try #require(RedditCredential(apiAppID: "placeholder-client-id", refreshToken: "placeholder-refresh-token").authorizationID)
     let calls = Calls()
     let refresher = AccessTokenRefresher()
-    _ = await refresher.token(refreshToken: "r", forceRenew: false) {
+    _ = await refresher.refresh(for: authorization, forceRenew: false) {
       calls.record(["first"])
-      return self.token("new")
+      return .token(self.token("new"))
     }
-    let reused = await refresher.token(refreshToken: "r", forceRenew: true, rejected: "expired") {
+    let reused = await refresher.refresh(for: authorization, forceRenew: true, rejected: "expired") {
       calls.record(["second"])
-      return self.token("newer")
+      return .token(self.token("newer"))
     }
 
-    #expect(reused?.token == "new")
+    #expect(reused.accessToken?.token == "new")
+    #expect(calls.all.count == 1)
+  }
+
+  @Test func duplicateCredentialRecordsShareTheirOAuthGrant() async throws {
+    let first = RedditCredential(apiAppID: "placeholder-client-id", refreshToken: "placeholder-shared-grant")
+    var duplicate = first
+    duplicate.id = UUID()
+    let firstID = try #require(first.authorizationID), duplicateID = try #require(duplicate.authorizationID)
+    #expect(firstID != duplicateID)
+    let calls = Calls()
+    let refresher = AccessTokenRefresher()
+    _ = await refresher.refresh(for: firstID, forceRenew: false) {
+      calls.record(["refresh"])
+      return .token(self.token("placeholder-shared-token"))
+    }
+    let shared = await refresher.refresh(for: duplicateID, forceRenew: false) {
+      calls.record(["unexpected"])
+      return .failed
+    }
+    #expect(shared.accessToken?.token == "placeholder-shared-token")
+    #expect(calls.all.count == 1)
+  }
+
+  @Test func differentClientsNeverShareARefreshTokenCache() async throws {
+    let first = RedditCredential(apiAppID: "placeholder-first-client", refreshToken: "placeholder-shared-grant")
+    var replacement = first
+    replacement.apiAppID = "placeholder-second-client"
+    replacement.refreshToken = "placeholder-shared-grant"
+    let firstID = try #require(first.authorizationID), replacementID = try #require(replacement.authorizationID)
+    let calls = Calls()
+    let refresher = AccessTokenRefresher()
+    _ = await refresher.refresh(for: firstID, forceRenew: false) {
+      calls.record(["first"])
+      return .token(self.token("placeholder-first-token"))
+    }
+    let result = await refresher.refresh(for: replacementID, forceRenew: false) {
+      calls.record(["second"])
+      return .token(self.token("placeholder-second-token"))
+    }
+    #expect(result.accessToken?.token == "placeholder-second-token")
+    #expect(calls.all.count == 2)
+  }
+
+  @Test(arguments: [AccessTokenRefresher.Outcome.rejected, .failed])
+  func failedRefreshOutcomesAreNotCached(failure: AccessTokenRefresher.Outcome) async throws {
+    let authorization = try #require(RedditCredential(apiAppID: "placeholder-client-id", refreshToken: "placeholder-grant").authorizationID)
+    let calls = Calls()
+    let refresher = AccessTokenRefresher()
+    _ = await refresher.refresh(for: authorization, forceRenew: false) {
+      calls.record(["failure"])
+      return failure
+    }
+    let result = await refresher.refresh(for: authorization, forceRenew: false) {
+      calls.record(["success"])
+      return .token(self.token("placeholder-retry-token"))
+    }
+    #expect(result.accessToken?.token == "placeholder-retry-token")
+    #expect(calls.all.count == 2)
+  }
+
+  private actor RefreshGate {
+    private var started = false
+    private var continuation: CheckedContinuation<AccessTokenRefresher.Outcome, Never>?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func request() async -> AccessTokenRefresher.Outcome {
+      started = true
+      return await withCheckedContinuation { continuation in
+        self.continuation = continuation
+        waiters.forEach { $0.resume() }
+        waiters = []
+      }
+    }
+
+    func waitForRequest() async {
+      if started {
+        return
+      }
+      await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func complete(_ outcome: AccessTokenRefresher.Outcome) {
+      continuation?.resume(returning: outcome)
+    }
+  }
+
+  @Test func cancellingOneWaiterDoesNotCancelTheSharedRefresh() async throws {
+    let authorization = try #require(RedditCredential(apiAppID: "placeholder-client-id", refreshToken: "placeholder-grant").authorizationID)
+    let calls = Calls()
+    let gate = RefreshGate()
+    let refresher = AccessTokenRefresher()
+    let first = Task {
+      await refresher.refresh(for: authorization, forceRenew: false) {
+        calls.record(["refresh"])
+        return await gate.request()
+      }
+    }
+    await gate.waitForRequest()
+    first.cancel()
+    let second = Task {
+      await refresher.refresh(for: authorization, forceRenew: false) {
+        calls.record(["unexpected"])
+        return .failed
+      }
+    }
+    await gate.complete(.token(token("placeholder-shared-token")))
+    let firstResult = await first.value, secondResult = await second.value
+    #expect(firstResult.accessToken?.token == "placeholder-shared-token")
+    #expect(secondResult.accessToken?.token == "placeholder-shared-token")
     #expect(calls.all.count == 1)
   }
 }

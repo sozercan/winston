@@ -83,7 +83,7 @@ struct AnySwipeAction: Codable, Defaults.Serializable, Identifiable, Hashable, E
 
   let actionClosure: (Any) async -> Void
   let activeClosure: (Any) -> Bool
-  let enabledClosure: (Any) -> Bool
+  let enabledClosure: @MainActor (Any) -> Bool
 
   private let base: Base
 
@@ -133,6 +133,7 @@ struct AnySwipeAction: Codable, Defaults.Serializable, Identifiable, Hashable, E
     activeClosure(entity)
   }
 
+  @MainActor
   func enabled(_ entity: Any) -> Bool {
     enabledClosure(entity)
   }
@@ -168,6 +169,7 @@ protocol SwipeAction: Codable, Identifiable, Defaults.Serializable {
   associatedtype EntityHelioDataType: Hashable
   func action(_ entity: GenericRedditEntity<EntityType, EntityHelioDataType>) async
   func active(_ entity: GenericRedditEntity<EntityType, EntityHelioDataType>) -> Bool
+  @MainActor
   func enabled(_ entity: GenericRedditEntity<EntityType, EntityHelioDataType>) -> Bool
 }
 
@@ -185,6 +187,7 @@ struct UpvotePostAction: SwipeAction {
     entity.data?.likes == true
   }
 
+  @MainActor
   func enabled(_ entity: Post) -> Bool {
     true
   }
@@ -204,6 +207,7 @@ struct DownvotePostAction: SwipeAction {
     entity.data?.likes == false
   }
 
+  @MainActor
   func enabled(_ entity: Post) -> Bool {
     true
   }
@@ -223,6 +227,7 @@ struct SavePostAction: SwipeAction {
     entity.data?.saved == true
   }
 
+  @MainActor
   func enabled(_ entity: Post) -> Bool {
     true
   }
@@ -242,6 +247,7 @@ struct ReplyPostAction: SwipeAction {
     false
   }
 
+  @MainActor
   func enabled(_ entity: Post) -> Bool {
     true
   }
@@ -261,6 +267,7 @@ struct SeenPostAction: SwipeAction {
     entity.data?.helioSeen ?? false
   }
 
+  @MainActor
   func enabled(_ entity: Post) -> Bool {
     true
   }
@@ -288,6 +295,7 @@ struct FilterSubredditAction: SwipeAction {
     return false
   }
 
+  @MainActor
   func enabled(_ entity: Post) -> Bool {
     true
   }
@@ -307,6 +315,7 @@ struct UpvoteCommentAction: SwipeAction {
     entity.data?.likes == true
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     true
   }
@@ -326,6 +335,7 @@ struct DownvoteCommentAction: SwipeAction {
     entity.data?.likes == false
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     true
   }
@@ -347,6 +357,7 @@ struct ReplyCommentAction: SwipeAction {
     false
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     true
   }
@@ -366,6 +377,7 @@ struct SaveCommentAction: SwipeAction {
     entity.data?.saved == true
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     true
   }
@@ -385,6 +397,7 @@ struct SelectTextCommentAction: SwipeAction {
     false
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     true
   }
@@ -402,6 +415,7 @@ struct ShareCommentAction: SwipeAction {
     true
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     true
   }
@@ -421,6 +435,7 @@ struct CopyCommentAction: SwipeAction {
     false
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     true
   }
@@ -440,6 +455,7 @@ struct EditCommentAction: SwipeAction {
     false
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     entity.data?.author == entity.redditAPI.me?.data?.name
   }
@@ -459,6 +475,7 @@ struct DeleteCommentAction: SwipeAction {
     false
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     entity.data?.author == entity.redditAPI.me?.data?.name
   }
@@ -478,6 +495,7 @@ struct CollapseCommentAction: SwipeAction {
     false
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     true
   }
@@ -494,6 +512,7 @@ struct NoneAction: SwipeAction {
     false
   }
 
+  @MainActor
   func enabled(_ entity: Comment) -> Bool {
     false
   }
@@ -514,6 +533,7 @@ struct ToggleReadMessageAction: SwipeAction {
     !(entity.data?.new ?? false)
   }
 
+  @MainActor
   func enabled(_ entity: Message) -> Bool {
     true
   }

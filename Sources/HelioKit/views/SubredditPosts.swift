@@ -19,8 +19,8 @@ struct SubredditPosts: View, Equatable {
   @Environment(\.contentWidth) private var contentWidth
   @Default(.SubredditFeedDefSettings) private var subFeedSettings
 
-  func caller(_ lastElementId: String?, _ sorting: SubListingSortOption?, _ searchQuery: String?, _ flair: String?) async -> ([RedditEntityType]?, String?)? {
-    if let sorting, let result = await subreddit.fetchPosts(sort: sorting, after: lastElementId, searchText: searchQuery, contentWidth: contentWidth, flair: flair), let entities = result.0 {
+  func caller(_ lastElementId: String?, _ sorting: SubListingSortOption?, _ searchQuery: String?, _ flair: String?, _ limit: Int) async -> ([RedditEntityType]?, String?)? {
+    if let sorting, let result = await subreddit.fetchPosts(sort: sorting, after: lastElementId, searchText: searchQuery, contentWidth: contentWidth, flair: flair, limit: limit), let entities = result.0 {
       return (entities, result.1)
     }
     return nil

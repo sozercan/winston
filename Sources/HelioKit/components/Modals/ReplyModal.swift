@@ -202,8 +202,10 @@ struct ReplyModal<Content: View>: View {
         }
       }
       .onAppear {
-        Task(priority: .background) {
-          await RedditAPI.shared.fetchMe()
+        Task(priority: .utility) {
+          if RedditAPI.shared.me == nil {
+            await RedditCredentialsManager.profile.refresh()
+          }
         }
         if let draftEntity = drafts.first(where: { draft in draft.thingID == thingFullname }) {
           if let draftText = draftEntity.replyText {

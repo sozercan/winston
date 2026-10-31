@@ -32,27 +32,34 @@ actor RedditInfoLoader {
   }
 
   struct Key: Hashable, Sendable {
-    let account: UUID?
+    let account: RedditCredential.AuthorizationID
     let target: Target
   }
 
-  typealias Fetch = @Sendable (_ fullnames: [String], _ subredditNames: [String], _ account: RedditCredential?) async -> [Thing]?
+  typealias Fetch = @Sendable (_ fullnames: [String], _ subredditNames: [String], _ account: RedditCredential) async -> [Thing]?
 
   private let fetch: Fetch
-  private let currentAccount: @Sendable () -> RedditCredential?
+  private let currentAccount: @Sendable () async -> RedditCredential?
+  private let authorizationIsCurrent: @Sendable (RedditCredential) async -> Bool
   private var cache: [Key: (thing: Thing, date: Date)] = [:]
   private var pending: Set<Key> = []
-  private var accounts: [UUID: RedditCredential] = [:]
+  private var accounts: [RedditCredential.AuthorizationID: RedditCredential] = [:]
   private var flush: Task<Void, Never>?
   private var inFlight: [Key: Task<Void, Never>] = [:]
 
   init(
-    currentAccount: @escaping @Sendable () -> RedditCredential? = { RedditCredentialsManager.shared.selectedCredential },
+    currentAccount: @escaping @Sendable () async -> RedditCredential? = {
+      await MainActor.run { RedditCredentialsManager.shared.selectedCredential }
+    },
+    authorizationIsCurrent: @escaping @Sendable (RedditCredential) async -> Bool = { account in
+      await MainActor.run { RedditCredentialsManager.shared.credentials.contains { $0.authorizationID == account.authorizationID } }
+    },
     fetch: @escaping Fetch = { fullnames, names, account in
       await RedditAPI.shared.fetchInfoThings(fullnames: fullnames, subredditNames: names, account: account)
     },
   ) {
     self.currentAccount = currentAccount
+    self.authorizationIsCurrent = authorizationIsCurrent
     self.fetch = fetch
   }
 
@@ -81,15 +88,17 @@ actor RedditInfoLoader {
   }
 
   func thing(_ target: Target) async -> Thing? {
-    let account = currentAccount()
-    let key = Key(account: account?.id, target: target)
+    guard let account = await currentAccount(), let authorization = account.authorizationID else { return nil }
+    let key = Key(account: authorization, target: target)
     if let cached = cache[key], Date().timeIntervalSince(cached.date) < Self.maxAge {
+      guard await authorizationIsCurrent(account) else {
+        cache[key] = nil
+        return nil
+      }
       return cached.thing
     }
     if inFlight[key] == nil {
-      if let account {
-        accounts[account.id] = account
-      }
+      accounts[authorization] = account
       pending.insert(key)
       let flush = flush ?? Task {
         try? await Task.sleep(for: Self.coalesceDelay)
@@ -99,18 +108,24 @@ actor RedditInfoLoader {
       inFlight[key] = flush
     }
     await inFlight[key]?.value
+    guard await authorizationIsCurrent(account) else {
+      cache[key] = nil
+      return nil
+    }
     return cache[key]?.thing
   }
 
   private func sendPending() async {
     let keys = Array(pending)
+    let accounts = accounts
+    self.accounts = [:] // Retain credential snapshots only for pending/in-flight work, not the cache.
     pending = []
     flush = nil
     func batches(_ list: [String]) -> [[String]] {
       stride(from: 0, to: list.count, by: Self.batchSize).map { Array(list[$0 ..< min($0 + Self.batchSize, list.count)]) }
     }
     struct Request {
-      let account: UUID?
+      let account: RedditCredential.AuthorizationID
       let fullnames: [String]
       let names: [String]
     }
@@ -127,16 +142,19 @@ actor RedditInfoLoader {
       requests += batches(fullnames).map { Request(account: account, fullnames: $0, names: []) }
         + batches(names).map { Request(account: account, fullnames: [], names: $0) }
     }
-    let accounts = accounts
-    let results = await withTaskGroup(of: (UUID?, [Thing]).self) { group in
+    let results = await withTaskGroup(of: (RedditCredential.AuthorizationID, [Thing]).self) { group in
       for request in requests {
-        let credential = request.account.flatMap { accounts[$0] }
-        group.addTask { [fetch] in await (request.account, fetch(request.fullnames, request.names, credential) ?? []) }
+        guard let credential = accounts[request.account] else { continue }
+        group.addTask { [fetch, authorizationIsCurrent] in
+          guard await authorizationIsCurrent(credential) else { return (request.account, []) }
+          return await (request.account, fetch(request.fullnames, request.names, credential) ?? [])
+        }
       }
       return await group.reduce(into: []) { $0.append($1) }
     }
     let now = Date()
     for (account, things) in results {
+      guard let credential = accounts[account], await authorizationIsCurrent(credential) else { continue }
       for thing in things {
         for target in Self.targets(of: thing) {
           cache[Key(account: account, target: target)] = (thing, now)
@@ -158,9 +176,8 @@ actor RedditInfoLoader {
 }
 
 extension RedditAPI {
-  /// `/api/info` for fullnames or for subreddit names (Reddit takes one or the other), as `account`
-  /// (the selected account when nil).
-  func fetchInfoThings(fullnames: [String], subredditNames: [String], account: RedditCredential?) async -> [RedditInfoLoader.Thing]? {
+  /// `/api/info` as the captured authorization; nil never means a later account selection.
+  func fetchInfoThings(fullnames: [String], subredditNames: [String], account: RedditCredential) async -> [RedditInfoLoader.Thing]? {
     let params = subredditNames.isEmpty ? FetchInfoThingsPayload(id: fullnames.joined(separator: ",")) : FetchInfoThingsPayload(sr_name: subredditNames.joined(separator: ","))
     switch await self.doRequest("\(RedditAPI.redditApiURLBase)/api/info", method: .get, params: params, paramsLocation: .queryString, decodable: InfoListing.self, altCredential: account) {
     case let .success(listing):

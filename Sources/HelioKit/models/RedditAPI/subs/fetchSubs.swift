@@ -58,12 +58,25 @@ extension RedditAPI {
   }
 
   /// Whether the subscriptions were saved.
+  @MainActor
   @discardableResult
-  func updateSubsInCoreData(with subs: [ListingChild<SubredditData>], account: RedditCredential? = nil) async -> Bool {
-    guard let credentialID = account?.id ?? Defaults[.GeneralDefSettings].redditCredentialSelectedID else { return false }
-    let context = PersistenceController.shared.container.newBackgroundContext()
+  func updateSubsInCoreData(
+    with subs: [ListingChild<SubredditData>],
+    account: RedditCredential? = nil,
+    credentialsManager: RedditCredentialsManager = .shared,
+    context: NSManagedObjectContext? = nil,
+  ) async -> Bool {
+    guard
+      let credential = account ?? credentialsManager.selectedCredential,
+      let authorization = credential.authorizationID,
+      credentialsManager.containsAuthorization(authorization)
+    else { return false }
+    let credentialID = credential.id
+    let context = context ?? PersistenceController.shared.container.newBackgroundContext()
 
-    return await context.perform(schedule: .enqueued) {
+    // Keep grant membership and persistence in one main-actor turn: no replacement can
+    // slip between the check and the save while the context is queued.
+    return context.performAndWait {
       let fetchRequest = NSFetchRequest<CachedSub>(entityName: "CachedSub")
       fetchRequest.predicate = NSPredicate(format: "helioCredentialID == %@", credentialID as CVarArg)
       do {
@@ -113,8 +126,8 @@ extension RedditAPI {
 
   @discardableResult
   func fetchSubsAndSyncCoreData(account: RedditCredential? = nil) async -> Bool {
-    guard let fetchedSubs = await fetchAllSubs(account: account) else { return false }
-    return await updateSubsInCoreData(with: fetchedSubs, account: account)
+    guard let credential = await MainActor.run(body: { account ?? RedditCredentialsManager.shared.selectedCredential }), let fetchedSubs = await fetchAllSubs(account: credential) else { return false }
+    return await updateSubsInCoreData(with: fetchedSubs, account: credential)
   }
 
   //  func fetchSubs(after: String? = nil) async -> [ListingChild<SubredditData>]? {

@@ -6,10 +6,11 @@
 //
 
 import Alamofire
+import Defaults
 import Foundation
 
 extension RedditAPI {
-  func fetchUserOverview(_ userName: String, _ dataTypeFilter: String? = nil, _ after: String? = nil) async -> ([Either<PostData, CommentData>]?, String?)? {
+  func fetchUserOverview(_ userName: String, _ dataTypeFilter: String? = nil, _ after: String? = nil, limit: Int = Defaults[.SubredditFeedDefSettings].chunkLoadSize) async -> ([Either<PostData, CommentData>]?, String?)? {
     var endpoint: String
 
     if let dataTypeFilter, !dataTypeFilter.isEmpty {
@@ -27,8 +28,9 @@ extension RedditAPI {
 
     var urlComponents = URLComponents(string: endpoint)!
 
+    urlComponents.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
     if let after {
-      urlComponents.queryItems = [URLQueryItem(name: "after", value: after)]
+      urlComponents.queryItems?.append(URLQueryItem(name: "after", value: after))
     }
 
     guard let requestURL = urlComponents.url else {

@@ -9,26 +9,11 @@ import Alamofire
 import Foundation
 
 extension RedditAPI {
-  func fetchMe(force: Bool = false, altCredential: RedditCredential? = nil, saveToken: Bool = true) async -> UserData? {
-    if !force, let me {
-      await MainActor.run {
-        RedditAPI.shared.me = me
-      }
-    } else {
-      switch await self.doRequest("\(RedditAPI.redditApiURLBase)/api/v1/me", method: .get, decodable: UserData.self, altCredential: altCredential, saveToken: saveToken) {
-      case let .success(data):
-        await MainActor.run {
-          RedditAPI.shared.me = User(data: data)
-        }
-        return data
-      case let .failure(error):
-        print(error)
-        await MainActor.run {
-          RedditAPI.shared.me = nil
-        }
-        return nil
-      }
+  /// Fetches profile data only. Selected-account publication belongs to the credentials manager.
+  func fetchMe(altCredential: RedditCredential? = nil, saveToken: Bool = true) async -> UserData? {
+    switch await doRequest("\(RedditAPI.redditApiURLBase)/api/v1/me", method: .get, decodable: UserData.self, altCredential: altCredential, saveToken: saveToken) {
+    case let .success(data): data
+    case .failure: nil
     }
-    return nil
   }
 }
